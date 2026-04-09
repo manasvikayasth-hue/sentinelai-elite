@@ -1,172 +1,147 @@
 import streamlit as st
 import cv2
-from ultralytics import YOLO
+import numpy as np
+import face_recognition
 import os
 from datetime import datetime
 import sqlite3
-import time
-import threading
-import face_recognition
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
+import base64
 
-# ---------------- CONFIG ---------------- #
-st.set_page_config(page_title="SentinelAI ELITE", layout="wide")
+# ================= CONFIG =================
+st.set_page_config(page_title="SentinelAI Elite", layout="wide")
 
-DETECTIONS_DIR = "detections"
-KNOWN_DIR = "known_faces"
-DB_PATH = "database.db"
+st.title("🛡️ SentinelAI Elite")
+st.markdown("### AI Surveillance + Face Recognition System")
 
-os.makedirs(DETECTIONS_DIR, exist_ok=True)
+# ================= ALERT SOUND =================
+def play_alert():
+    audio_file = open("alert.wav", "rb")
+    audio_bytes = audio_file.read()
+    b64 = base64.b64encode(audio_bytes).decode()
+    md = f"""
+    <audio autoplay>
+    <source src="data:audio/wav;base64,{b64}" type="audio/wav">
+    </audio>
+    """
+    st.markdown(md, unsafe_allow_html=True)
 
-# ---------------- DATABASE ---------------- #
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+# ================= DATABASE =================
+conn = sqlite3.connect("logs.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
 CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT,
-    person TEXT,
-    status TEXT,
+    person_name TEXT,
+    threat TEXT,
     image_path TEXT
 )
 """)
 conn.commit()
 
-def log_event(person, status, path):
-    c.execute("INSERT INTO logs (timestamp, person, status, image_path) VALUES (?, ?, ?, ?)",
-              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), person, status, path))
+def log_detection(name, threat, path):
+    c.execute(
+        "INSERT INTO logs (timestamp, person_name, threat, image_path) VALUES (?, ?, ?, ?)",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), name, threat, path)
+    )
     conn.commit()
 
-# ---------------- EMAIL ---------------- #
-def send_email(image_path, label):
-    user = os.environ.get("EMAIL_USER")
-    password = os.environ.get("EMAIL_PASS")
-    to = os.environ.get("EMAIL_TO")
+# ================= FACE DATABASE =================
+if "known_encodings" not in st.session_state:
+    st.session_state.known_encodings = []
+    st.session_state.known_names = []
 
-    if not user or not password or not to:
-        return
+# ================= FACE UPLOAD =================
+st.sidebar.header("👤 Add Known Faces")
 
-    msg = MIMEMultipart()
-    msg["From"] = user
-    msg["To"] = to
-    msg["Subject"] = f"🚨 SentinelAI Alert: {label}"
+uploaded = st.sidebar.file_uploader("Upload Face", type=["jpg","png","jpeg"])
 
-    part = MIMEBase('application', 'octet-stream')
-    with open(image_path, 'rb') as f:
-        part.set_payload(f.read())
-    encoders.encode_base64(part)
-    part.add_header('Content-Disposition', f'attachment; filename="{os.path.basename(image_path)}"')
-    msg.attach(part)
+if uploaded:
+    name = st.sidebar.text_input("Enter Name")
 
-    try:
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(user, password)
-        server.send_message(msg)
-        server.quit()
-    except:
-        pass
+    if st.sidebar.button("Save Face"):
+        img = face_recognition.load_image_file(uploaded)
+        enc = face_recognition.face_encodings(img)
 
-# ---------------- SOUND ---------------- #
-def play_sound():
-    os.system("afplay /System/Library/Sounds/Ping.aiff")
+        if enc:
+            st.session_state.known_encodings.append(enc[0])
+            st.session_state.known_names.append(name)
+            st.sidebar.success(f"{name} added!")
 
-# ---------------- LOAD FACES ---------------- #
-known_encodings = []
-known_names = []
+# ================= CAMERA =================
+run = st.checkbox("Start Monitoring")
 
-for file in os.listdir(KNOWN_DIR):
-    img_path = os.path.join(KNOWN_DIR, file)
-    img = face_recognition.load_image_file(img_path)
-    enc = face_recognition.face_encodings(img)
-    if enc:
-        known_encodings.append(enc[0])
-        known_names.append(os.path.splitext(file)[0])
+frame_window = st.empty()
+alert_box = st.empty()
 
-# ---------------- MODEL ---------------- #
-model = YOLO("yolov8n.pt")
-
-# ---------------- LOGIN ---------------- #
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-def login():
-    st.title("🔐 SentinelAI Login")
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-        if u in ["admin", "viewer"] and p == "1234":
-            st.session_state.user = u
-            st.rerun()
-        else:
-            st.error("Invalid credentials")
-
-if not st.session_state.user:
-    login()
-    st.stop()
-
-# ---------------- UI ---------------- #
-st.title("🛰️ SentinelAI ELITE")
-
-run = st.toggle("Start Monitoring")
-FRAME = st.empty()
-
-# ---------------- MONITOR ---------------- #
 if run:
     cap = cv2.VideoCapture(0)
-    last_alert = 0
 
-    while True:
+    if not cap.isOpened():
+        st.error("Camera not accessible")
+
+    frame_count = 0
+
+    while run:
         ret, frame = cap.read()
         if not ret:
             break
 
-        rgb = frame[:, :, ::-1]
-        face_locations = face_recognition.face_locations(rgb)
-        face_encs = face_recognition.face_encodings(rgb, face_locations)
+        frame_count += 1
 
-        for (top, right, bottom, left), face_enc in zip(face_locations, face_encs):
+        # 🔥 Resize for speed
+        small = cv2.resize(frame, (0,0), fx=0.5, fy=0.5)
+        rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
 
-            matches = face_recognition.compare_faces(known_encodings, face_enc)
-            name = "Unknown"
+        # 🔥 Process every 4 frames
+        if frame_count % 4 == 0:
+            faces = face_recognition.face_locations(rgb_small)
+            encodings = face_recognition.face_encodings(rgb_small, faces)
 
-            if True in matches:
-                name = known_names[matches.index(True)]
+            for (top, right, bottom, left), face_encoding in zip(faces, encodings):
 
-            # draw box
-            cv2.rectangle(frame, (left, top), (right, bottom), (0,255,0), 2)
-            cv2.putText(frame, name, (left, top-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+                top*=2; right*=2; bottom*=2; left*=2
 
-            # 🚨 ALERT ONLY FOR UNKNOWN
-            if name == "Unknown" and time.time() - last_alert > 5:
-                st.warning("🚨 UNKNOWN PERSON DETECTED")
+                name = "Unknown"
+                if len(st.session_state.known_encodings) > 0:
+                    matches = face_recognition.compare_faces(st.session_state.known_encodings, face_encoding)
+                    distances = face_recognition.face_distance(st.session_state.known_encodings, face_encoding)
 
-                threading.Thread(target=play_sound).start()
+                    if len(distances) > 0:
+                        best = np.argmin(distances)
+                        if matches[best]:
+                            name = st.session_state.known_names[best]
 
-                filename = f"{DETECTIONS_DIR}/{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                cv2.imwrite(filename, frame)
+                threat = "SAFE" if name!="Unknown" else "THREAT"
+                color = (0,255,0) if threat=="SAFE" else (0,0,255)
 
-                log_event(name, "INTRUDER", filename)
+                cv2.rectangle(frame,(left,top),(right,bottom),color,2)
+                cv2.putText(frame,name,(left,top-10),cv2.FONT_HERSHEY_SIMPLEX,0.7,color,2)
 
-                threading.Thread(target=send_email, args=(filename, "Unknown Person")).start()
+                # 🚨 ALERT
+                if threat == "THREAT":
+                    if not os.path.exists("detections"):
+                        os.makedirs("detections")
 
-                last_alert = time.time()
+                    filename = f"detections/{datetime.now().strftime('%H%M%S')}.jpg"
+                    cv2.imwrite(filename, frame)
 
-        FRAME.image(frame, channels="BGR")
+                    log_detection(name, threat, filename)
+
+                    alert_box.error("🚨 UNKNOWN PERSON DETECTED!")
+                    play_alert()
+
+        frame_window.image(frame, channels="BGR")
 
     cap.release()
 
-# ---------------- INCIDENT FEED ---------------- #
-st.subheader("📋 Incident Feed")
+# ================= INCIDENT FEED =================
+st.subheader("📜 Incident Feed")
 
-c.execute("SELECT * FROM logs ORDER BY id DESC LIMIT 5")
-rows = c.fetchall()
+rows = c.execute("SELECT * FROM logs ORDER BY id DESC LIMIT 5").fetchall()
 
 for r in rows:
-    st.write(f"🚨 {r[2]} | {r[3]} | {r[1]}")
+    st.write(f"{r[1]} | {r[2]} | {r[3]}")
     if os.path.exists(r[4]):
-        st.image(r[4])
+        st.image(r[4], width=200)
