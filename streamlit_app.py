@@ -1,147 +1,65 @@
 import streamlit as st
-import cv2
-import numpy as np
 import face_recognition
+import numpy as np
+from PIL import Image
 import os
 from datetime import datetime
-import sqlite3
-import base64
 
-# ================= CONFIG =================
-st.set_page_config(page_title="SentinelAI Elite", layout="wide")
+st.set_page_config(page_title="SentinelAI Lite", layout="centered")
 
-st.title("🛡️ SentinelAI Elite")
-st.markdown("### AI Surveillance + Face Recognition System")
+st.title("🛡️ SentinelAI Lite")
+st.write("Simple AI Face Recognition System")
 
-# ================= ALERT SOUND =================
-def play_alert():
-    audio_file = open("alert.wav", "rb")
-    audio_bytes = audio_file.read()
-    b64 = base64.b64encode(audio_bytes).decode()
-    md = f"""
-    <audio autoplay>
-    <source src="data:audio/wav;base64,{b64}" type="audio/wav">
-    </audio>
-    """
-    st.markdown(md, unsafe_allow_html=True)
+KNOWN_FACES_DIR = "known_faces"
+DETECTIONS_DIR = "detections"
 
-# ================= DATABASE =================
-conn = sqlite3.connect("logs.db", check_same_thread=False)
-c = conn.cursor()
+os.makedirs(DETECTIONS_DIR, exist_ok=True)
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT,
-    person_name TEXT,
-    threat TEXT,
-    image_path TEXT
-)
-""")
-conn.commit()
+# Load known faces
+known_encodings = []
+known_names = []
 
-def log_detection(name, threat, path):
-    c.execute(
-        "INSERT INTO logs (timestamp, person_name, threat, image_path) VALUES (?, ?, ?, ?)",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), name, threat, path)
-    )
-    conn.commit()
+for file in os.listdir(KNOWN_FACES_DIR):
+    if file.endswith((".jpg", ".png")):
+        img = face_recognition.load_image_file(f"{KNOWN_FACES_DIR}/{file}")
+        encodings = face_recognition.face_encodings(img)
+        if encodings:
+            known_encodings.append(encodings[0])
+            known_names.append(file.split(".")[0])
 
-# ================= FACE DATABASE =================
-if "known_encodings" not in st.session_state:
-    st.session_state.known_encodings = []
-    st.session_state.known_names = []
+st.subheader("📤 Upload Image")
+uploaded_file = st.file_uploader("Choose an image", type=["jpg", "png"])
 
-# ================= FACE UPLOAD =================
-st.sidebar.header("👤 Add Known Faces")
+if uploaded_file:
+    image = np.array(Image.open(uploaded_file))
+    face_locations = face_recognition.face_locations(image)
+    face_encodings = face_recognition.face_encodings(image, face_locations)
 
-uploaded = st.sidebar.file_uploader("Upload Face", type=["jpg","png","jpeg"])
+    results = []
 
-if uploaded:
-    name = st.sidebar.text_input("Enter Name")
+    for face_encoding in face_encodings:
+        matches = face_recognition.compare_faces(known_encodings, face_encoding)
+        name = "UNKNOWN"
 
-    if st.sidebar.button("Save Face"):
-        img = face_recognition.load_image_file(uploaded)
-        enc = face_recognition.face_encodings(img)
+        if True in matches:
+            name = known_names[matches.index(True)]
 
-        if enc:
-            st.session_state.known_encodings.append(enc[0])
-            st.session_state.known_names.append(name)
-            st.sidebar.success(f"{name} added!")
+        results.append(name)
 
-# ================= CAMERA =================
-run = st.checkbox("Start Monitoring")
+    st.subheader("🔍 Results")
 
-frame_window = st.empty()
-alert_box = st.empty()
+    if results:
+        for name in results:
+            if name == "UNKNOWN":
+                st.error("⚠️ UNKNOWN PERSON DETECTED")
+            else:
+                st.success(f"✅ SAFE: {name}")
+    else:
+        st.warning("No face detected")
 
-if run:
-    cap = cv2.VideoCapture(0)
+    # Save detection image
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = f"{DETECTIONS_DIR}/{timestamp}.jpg"
+    Image.fromarray(image).save(save_path)
 
-    if not cap.isOpened():
-        st.error("Camera not accessible")
-
-    frame_count = 0
-
-    while run:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        frame_count += 1
-
-        # 🔥 Resize for speed
-        small = cv2.resize(frame, (0,0), fx=0.5, fy=0.5)
-        rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-
-        # 🔥 Process every 4 frames
-        if frame_count % 4 == 0:
-            faces = face_recognition.face_locations(rgb_small)
-            encodings = face_recognition.face_encodings(rgb_small, faces)
-
-            for (top, right, bottom, left), face_encoding in zip(faces, encodings):
-
-                top*=2; right*=2; bottom*=2; left*=2
-
-                name = "Unknown"
-                if len(st.session_state.known_encodings) > 0:
-                    matches = face_recognition.compare_faces(st.session_state.known_encodings, face_encoding)
-                    distances = face_recognition.face_distance(st.session_state.known_encodings, face_encoding)
-
-                    if len(distances) > 0:
-                        best = np.argmin(distances)
-                        if matches[best]:
-                            name = st.session_state.known_names[best]
-
-                threat = "SAFE" if name!="Unknown" else "THREAT"
-                color = (0,255,0) if threat=="SAFE" else (0,0,255)
-
-                cv2.rectangle(frame,(left,top),(right,bottom),color,2)
-                cv2.putText(frame,name,(left,top-10),cv2.FONT_HERSHEY_SIMPLEX,0.7,color,2)
-
-                # 🚨 ALERT
-                if threat == "THREAT":
-                    if not os.path.exists("detections"):
-                        os.makedirs("detections")
-
-                    filename = f"detections/{datetime.now().strftime('%H%M%S')}.jpg"
-                    cv2.imwrite(filename, frame)
-
-                    log_detection(name, threat, filename)
-
-                    alert_box.error("🚨 UNKNOWN PERSON DETECTED!")
-                    play_alert()
-
-        frame_window.image(frame, channels="BGR")
-
-    cap.release()
-
-# ================= INCIDENT FEED =================
-st.subheader("📜 Incident Feed")
-
-rows = c.execute("SELECT * FROM logs ORDER BY id DESC LIMIT 5").fetchall()
-
-for r in rows:
-    st.write(f"{r[1]} | {r[2]} | {r[3]}")
-    if os.path.exists(r[4]):
-        st.image(r[4], width=200)
+    st.image(image, caption="Processed Image")

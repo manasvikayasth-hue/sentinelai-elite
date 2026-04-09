@@ -1,7 +1,1 @@
-venv/
-__pycache__/
-*.pyc
-*.db
-detections/
-yolov8n.pt
 .DS_Store
