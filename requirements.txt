@@ -1,5 +1,5 @@
 streamlit
-face-recognition
+ultralytics
 opencv-python-headless
 numpy
 pillow
